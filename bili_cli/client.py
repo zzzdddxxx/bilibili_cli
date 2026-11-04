@@ -99,6 +99,31 @@ async def get_video_info(bvid: str, credential: Credential | None = None) -> dic
     return await _call_api("获取视频信息", v.get_info())
 
 
+def video_availability(info: dict[str, Any]) -> dict[str, Any]:
+    """判断视频是否可用（可观看/可获取字幕）。
+
+    基于 get_info() 返回的字段，返回 {"available": bool, "reasons": [str]}。
+    reasons 为空列表表示可用。
+    """
+    rights = info.get("rights") or {}
+    if not isinstance(rights, dict):
+        rights = {}
+
+    reasons: list[str] = []
+    state = info.get("state")
+    if state not in (0, None):
+        reasons.append(f"稿件状态异常(state={state})")
+    if rights.get("elec") == 1:
+        reasons.append("充电专属视频")
+    if rights.get("pay") == 1 or rights.get("ugc_pay") == 1 or rights.get("arc_pay") == 1:
+        reasons.append("付费视频")
+    if rights.get("area_limit") == 1:
+        reasons.append("地区限制")
+    if info.get("redirect_url"):
+        reasons.append("稿件已转移")
+    return {"available": not reasons, "reasons": reasons}
+
+
 def format_subtitle_timeline(
     raw: list[dict[str, Any]] | None,
     output_format: str = "timeline",

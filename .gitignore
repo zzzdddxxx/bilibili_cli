@@ -27,3 +27,7 @@ Thumbs.db
 .env.local
 
 # uv
+
+# demo 运行产物（字幕数据、分析结果）
+demo/data/
+demo/output/
