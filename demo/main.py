@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import shutil
 import sys
 from pathlib import Path
 
@@ -37,6 +38,11 @@ DEFAULT_CONFIG: dict = {
     "bvids": [],             # analyze_mode 为 single/bvids 时生效
     "skip_fetch": False,     # 跳过拉字幕步骤
     "skip_analyze": False,   # 跳过分析步骤
+    "clear_subtitles": False,  # 运行前清空字幕目录（避免文件堆积）
+    "clear_output": False,     # 运行前清空输出目录（避免文件堆积）
+    "begin_date": None,        # 发布时间过滤：起始日期 "2026-08-01"（含）
+    "end_date": None,          # 发布时间过滤：结束日期 "2026-10-31"（含）
+    "sleep_range": [0.5, 2.5],  # 反爬：每个视频处理前的随机休息秒数范围（null 表示不休息）
 }
 
 
@@ -56,18 +62,35 @@ def load_config(path: Path) -> dict:
     return cfg
 
 
+def _clear_dir(path: Path) -> None:
+    """清空目录（删除后重建）。"""
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True, exist_ok=True)
+
+
 def do_fetch(cfg: dict) -> int:
     """步骤 1：批量拉取字幕。"""
     print("=" * 60)
     print("步骤 1/2：拉取字幕")
     print("=" * 60)
 
-    uid = fetch_subtitles.resolve_uid(cfg.get("up"))
+    uid, up_name = fetch_subtitles.resolve_up(cfg.get("up"))
     cred = auth.get_credential(mode="read")
     if not cred:
         print("错误：未登录。字幕接口需要登录凭证，请先运行 bili login。", file=sys.stderr)
         return 2
-    return asyncio.run(fetch_subtitles.run(uid, cfg.get("count", 8), cred))
+    return asyncio.run(
+        fetch_subtitles.run(
+            uid,
+            cfg.get("count", 8),
+            cred,
+            up_name,
+            cfg.get("begin_date"),
+            cfg.get("end_date"),
+            cfg.get("sleep_range"),
+        )
+    )
 
 
 def do_analyze(cfg: dict) -> int:
@@ -103,6 +126,13 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = load_config(args.config)
     print(f"配置文件：{args.config}")
+
+    if cfg.get("clear_subtitles"):
+        _clear_dir(fetch_subtitles.OUTPUT_DIR)
+        print(f"已清空字幕目录：{fetch_subtitles.OUTPUT_DIR}")
+    if cfg.get("clear_output"):
+        _clear_dir(analyze.OUTPUT_DIR)
+        print(f"已清空输出目录：{analyze.OUTPUT_DIR}")
 
     code = 0
     if not cfg.get("skip_fetch"):

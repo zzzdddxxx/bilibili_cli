@@ -6,8 +6,8 @@
   python fetch_subtitles.py 67079745 -n 8   按 UID
 
 输出：
-  data/subtitles/{BV号}_{发布时间}.txt  纯文本字幕
-  data/subtitles/{BV号}_{发布时间}.srt  SRT 时间轴字幕
+  data/subtitles/{up名}_{发布时间}_{BV号}.txt  纯文本字幕
+  data/subtitles/{up名}_{发布时间}_{BV号}.srt  SRT 时间轴字幕
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import random
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -40,6 +41,58 @@ def _ts_to_date(ts: object) -> str:
     if ts_int <= 0:
         return "unknown"
     return datetime.fromtimestamp(ts_int).strftime("%Y-%m-%d")
+
+
+def _parse_date_to_ts(date_str: str | None, *, end_of_day: bool = False) -> int | None:
+    """解析 YYYY-MM-DD 为 unix 时间戳。end_of_day=True 时取当天 23:59:59。
+
+    支持 YYYY-M-D（如 2026-11-4）和 YYYY-MM-DD（如 2026-11-04）。
+    """
+    if not date_str:
+        return None
+    s = str(date_str).strip()
+    if not s:
+        return None
+    try:
+        parts = s.split("-")
+        if len(parts) != 3:
+            raise ValueError
+        y, m, d = int(parts[0]), int(parts[1]), int(parts[2])
+        dt = datetime(y, m, d)
+    except (ValueError, TypeError):
+        print(f"错误：日期格式应为 YYYY-MM-DD：{date_str}", file=sys.stderr)
+        raise SystemExit(2)
+    if end_of_day:
+        dt = dt.replace(hour=23, minute=59, second=59)
+    return int(dt.timestamp())
+
+
+def _parse_sleep_range(sleep_range: object) -> tuple[float, float] | None:
+    """解析 sleep_range 配置为 (下限, 上限) 秒。None 或非法返回 None（表示不休息）。"""
+    if not sleep_range:
+        return None
+    if isinstance(sleep_range, (list, tuple)) and len(sleep_range) == 2:
+        try:
+            lo = float(sleep_range[0])  # type: ignore[arg-type]
+            hi = float(sleep_range[1])  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+        if lo < 0:
+            lo = 0.0
+        if hi < lo:
+            hi = lo
+        if hi <= 0:
+            return None
+        return lo, hi
+    return None
+
+
+def _short_name(name: str, max_len: int = 6) -> str:
+    """截断名称到最多 max_len 个字符，用于文件名。"""
+    name = (name or "").strip()
+    if not name:
+        return "up"
+    return name[:max_len]
 
 
 def resolve_uid(up: int | str | None = None) -> int:
@@ -68,20 +121,56 @@ def resolve_uid(up: int | str | None = None) -> int:
     return int(mid)
 
 
-async def run(uid: int, count: int, cred) -> int:
-    videos = await client.get_user_videos(uid, count=count, credential=cred)
+def resolve_up(up: int | str | None = None) -> tuple[int, str]:
+    """解析 up 为 (uid, 名称)。名称用于文件命名。"""
+    if isinstance(up, str) and up.strip() and not up.strip().isdigit():
+        # 用户直接给了名字
+        return resolve_uid(up), up.strip()
+    # UID 或默认：通过 API 获取名称
+    uid = resolve_uid(up)
+    name = ""
+    try:
+        info = asyncio.run(client.get_user_info(uid))
+        name = info.get("name", "") or ""
+    except Exception:  # noqa: BLE001
+        name = ""
+    return uid, name
+
+
+async def run(
+    uid: int,
+    count: int,
+    cred,
+    up_name: str = "",
+    begin_date: str | None = None,
+    end_date: str | None = None,
+    sleep_range: object = None,
+) -> int:
+    begin_ts = _parse_date_to_ts(begin_date, end_of_day=False)
+    end_ts = _parse_date_to_ts(end_date, end_of_day=True)
+    sleep = _parse_sleep_range(sleep_range)
+    videos = await client.get_user_videos_filtered(
+        uid, count=count, credential=cred, begin_ts=begin_ts, end_ts=end_ts
+    )
     if not videos:
         print("未获取到视频列表。")
         return 1
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"UP 主 UID {uid}，最近 {len(videos)} 个视频：\n")
+    up_short = _short_name(up_name)
+    print(f"UP 主 UID {uid}（{up_short}），最近 {len(videos)} 个视频：\n")
 
     ok = 0
     skipped = 0
     unavailable = 0
     meta_list: list[dict] = []
     for i, v in enumerate(videos, 1):
+        # 反爬：每个视频处理前随机休息（第一个不用）
+        if sleep is not None and i > 1:
+            delay = random.uniform(sleep[0], sleep[1])
+            print(f"    （防反爬，休息 {delay:.1f}s）")
+            await asyncio.sleep(delay)
+
         bvid = v.get("bvid", "")
         title = v.get("title", "")
         date = _ts_to_date(v.get("created", 0))
@@ -132,7 +221,7 @@ async def run(uid: int, count: int, cred) -> int:
             skipped += 1
             continue
 
-        base = f"{bvid}_{date}"
+        base = f"{up_short}_{date}_{bvid}"
         txt_path = OUTPUT_DIR / f"{base}.txt"
         srt_path = OUTPUT_DIR / f"{base}.srt"
         if txt_path.exists() and srt_path.exists():
@@ -166,16 +255,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="批量获取 UP 主视频字幕")
     parser.add_argument("up", nargs="?", default=None, help="UP 主名字或 UID（默认 67079745）")
     parser.add_argument("-n", "--count", type=int, default=5, help="获取最近 N 个视频（默认 5）")
+    parser.add_argument("--begin", dest="begin_date", default=None, help="起始日期 YYYY-MM-DD（含）")
+    parser.add_argument("--end", dest="end_date", default=None, help="结束日期 YYYY-MM-DD（含）")
+    parser.add_argument("--sleep-range", dest="sleep_range", nargs=2, type=float, default=None, help="反爬随机休息秒数范围，如 0.5 2.5")
     args = parser.parse_args(argv)
 
-    uid = resolve_uid(args.up)
+    uid, up_name = resolve_up(args.up)
 
     cred = auth.get_credential(mode="read")
     if not cred:
         print("错误：未登录。字幕接口需要登录凭证，请先运行 bili login。", file=sys.stderr)
         return 2
 
-    return asyncio.run(run(uid, args.count, cred))
+    return asyncio.run(run(uid, args.count, cred, up_name, args.begin_date, args.end_date, args.sleep_range))
 
 
 if __name__ == "__main__":

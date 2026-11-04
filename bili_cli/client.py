@@ -289,6 +289,57 @@ async def get_user_videos(
     return results
 
 
+async def get_user_videos_filtered(
+    uid: int,
+    count: int = 10,
+    credential: Credential | None = None,
+    begin_ts: int | None = None,
+    end_ts: int | None = None,
+) -> list[dict[str, Any]]:
+    """分页拉取用户视频，按发布时间 [begin_ts, end_ts] 闭区间过滤，最多返回 count 个。
+
+    视频列表按发布时间倒序返回；边分页拉取边过滤，满足条件即提前停止。
+    """
+    u = user.User(uid=uid, credential=credential)
+
+    results: list[dict[str, Any]] = []
+    page = 1
+    per_page = 50
+
+    while len(results) < count and page <= 20:
+        try:
+            data = await _call_api("获取用户视频列表", u.get_videos(ps=per_page, pn=page))
+        except BiliError as e:
+            if page == 1:
+                raise
+            logger.warning("Failed to get videos page %d: %s", page, e)
+            break
+
+        vlist = data.get("list", {}).get("vlist", [])
+        if not vlist:
+            break
+
+        for v in vlist:
+            created = v.get("created", 0) or 0
+            try:
+                created = int(created)
+            except (TypeError, ValueError):
+                created = 0
+
+            if end_ts is not None and created > end_ts:
+                continue  # 太新，跳过，继续看更旧的
+            if begin_ts is not None and created < begin_ts:
+                return results  # 已越过 begin，后面更旧，停止
+
+            results.append(v)
+            if len(results) >= count:
+                return results
+
+        page += 1
+
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Search
 # ---------------------------------------------------------------------------

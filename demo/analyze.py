@@ -32,12 +32,15 @@ SYSTEM_PROMPT = (
     "你是一名专业的视频内容总结助手。请根据提供的视频字幕（语音识别文本）"
     "输出结构化总结。要求：\n"
     "1. 使用中文。\n"
-    "2. 先写一句话概述（这个视频讲了什么）。\n"
+    "2. 先写一句话概述（这个视频讲了什么，禁止包含广告等无关信息）。\n"
     "3. 再用编号列表提炼主要内容要点（3~8 条，每条一句话）。\n"
-    "4. 只依据字幕内容，不要编造字幕中没有的信息。"
+    "4. 只依据字幕内容，不要编造字幕中没有的信息。\n"
+    "5. 广告处理：识别字幕中的广告、推广、带货内容（如品牌赞助、商品推荐、下载引导、优惠活动等），"
+    "禁止混入正文要点；将所有广告内容合并成一条，语言务必简短，用「广告：」开头，放在总结的最后；"
+    "若无广告则省略这一条。"
 )
 
-_FILENAME_RE = re.compile(r"^(BV[0-9A-Za-z]{10})_(\d{4}-\d{2}-\d{2})$")
+_FILENAME_RE = re.compile(r"^(?:.+_)?(\d{4}-\d{2}-\d{2})_(BV[0-9A-Za-z]{10})$")
 
 
 def load_meta() -> dict[str, dict]:
@@ -57,16 +60,16 @@ def load_meta() -> dict[str, dict]:
 
 
 def parse_bvid_date(stem: str) -> tuple[str, str] | None:
-    """从文件名 stem（如 BV1xxx_2026-10-31）解析 BV 号和日期。"""
+    """从文件名 stem（如 up名_2026-10-31_BV1xxx）解析 BV 号和日期。"""
     m = _FILENAME_RE.match(stem)
     if m:
-        return m.group(1), m.group(2)
+        return m.group(2), m.group(1)  # bvid, date
     return None
 
 
 def find_txt_by_bvid(bvid: str) -> Path | None:
     """在字幕目录中查找指定 BV 号的 .txt 文件。"""
-    for p in SUBTITLE_DIR.glob(f"{bvid}_*.txt"):
+    for p in SUBTITLE_DIR.glob(f"*_{bvid}.txt"):
         return p
     return None
 
