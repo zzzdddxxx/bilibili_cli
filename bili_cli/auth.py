@@ -18,8 +18,10 @@ import time
 from pathlib import Path
 from typing import Literal
 
+import aiohttp
 import qrcode
-from bilibili_api.login_v2 import QrCodeLogin, QrCodeLoginEvents
+from yarl import URL
+
 from bilibili_api.utils.network import Credential
 
 logger = logging.getLogger(__name__)
@@ -356,53 +358,106 @@ def _render_compact_qr(data: str) -> str | None:
     return "\n".join(lines)
 
 
-def _get_qr_terminal_output(login: QrCodeLogin) -> str:
-    """Choose compact QR rendering when possible, otherwise use default output."""
-    default_qr = login.get_qrcode_terminal()
+def _render_qr_terminal(qr_url: str) -> str:
+    """Render a QR code from a URL string, preferring compact half-blocks."""
+    if _supports_unicode_half_blocks():
+        compact = _render_compact_qr(qr_url)
+        if compact is not None:
+            return compact
+    import io
 
-    qr_link = getattr(login, "_QrCodeLogin__qr_link", None)
-    if not qr_link:
-        logger.warning("QR link unavailable from QrCodeLogin internals, using default renderer")
-        return default_qr
-
-    if not _supports_unicode_half_blocks():
-        logger.warning("stdout encoding cannot render Unicode QR blocks, using default renderer")
-        return default_qr
-
-    compact_qr = _render_compact_qr(qr_link)
-    if compact_qr is None:
-        return default_qr
-    return compact_qr
+    qr = qrcode.QRCode()
+    qr.add_data(qr_url)
+    qr.make(fit=True)
+    buf = io.StringIO()
+    qr.print_ascii(out=buf, invert=True)
+    return buf.getvalue()
 
 
 async def qr_login() -> Credential:
     """QR code login via terminal.
 
-    Displays a QR code in the terminal, polls until login completes,
-    then saves and returns the credential.
+    Implements Bilibili's current web login flow:
+    generate -> poll -> sso/list -> sso/set, then extracts SESSDATA from Set-Cookie.
     """
-    login = QrCodeLogin()
-    await login.generate_qrcode()
+    ua = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+    )
+    headers = {
+        "User-Agent": ua,
+        "Referer": "https://www.bilibili.com/",
+        "Origin": "https://www.bilibili.com",
+    }
+    generate_url = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
+    poll_url = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll"
+    sso_list_url = "https://passport.bilibili.com/x/passport-login/web/sso/list"
 
-    # Display QR code in terminal
-    print("\n📱 请使用 Bilibili App 扫描以下二维码登录:\n")
-    print(_get_qr_terminal_output(login))
-    print("\n⭐ 扫码后请在手机上确认登录...")
+    jar = aiohttp.CookieJar()
+    async with aiohttp.ClientSession(headers=headers, cookie_jar=jar) as session:
+        # Warm up main site to obtain base cookies (buvid3, bili_jct)
+        async with session.get("https://www.bilibili.com/") as resp:
+            await resp.read()
 
-    # Poll login state
-    while True:
-        state = await login.check_state()
+        # 1. Generate QR code
+        async with session.get(generate_url, params={"source": "main-fe-header"}) as resp:
+            gen = await resp.json()
+        data = gen.get("data") or {}
+        qrcode_key = data.get("qrcode_key", "")
+        qr_url = data.get("url", "")
+        if not qrcode_key or not qr_url:
+            raise RuntimeError("获取登录二维码失败")
 
-        if state == QrCodeLoginEvents.DONE:
-            credential = login.get_credential()
-            save_credential(credential)
-            print("\n✅ 登录成功！凭证已保存")
-            return credential
+        print("\n📱 请使用 Bilibili App 扫描以下二维码登录:\n")
+        print(_render_qr_terminal(qr_url))
+        print("\n⭐ 扫码后请在手机上确认登录...")
 
-        elif state == QrCodeLoginEvents.TIMEOUT:
-            raise RuntimeError("二维码已过期，请重试")
+        # 2. Poll login state
+        while True:
+            async with session.get(poll_url, params={"qrcode_key": qrcode_key, "source": "main-fe-header"}) as resp:
+                poll = await resp.json()
+            poll_data = poll.get("data") or {}
+            code = poll_data.get("code")
 
-        elif state == QrCodeLoginEvents.CONF:
-            print("  📲 已扫码，请在手机上确认...")
+            if code == 0:
+                refresh_token = poll_data.get("refresh_token", "")
 
-        await asyncio.sleep(2)
+                # 3. Fetch per-domain SSO tickets
+                site_cookies = jar.filter_cookies(URL("https://www.bilibili.com"))
+                csrf = site_cookies["bili_jct"].value if "bili_jct" in site_cookies else ""
+                async with session.post(sso_list_url, data={"csrf": csrf}) as resp:
+                    sso_resp = await resp.json()
+                sso_urls = (sso_resp.get("data") or {}).get("sso", [])
+
+                # 4. Plant login cookies via each sso/set
+                for sso_url in sso_urls:
+                    async with session.post(sso_url) as resp:
+                        await resp.read()
+
+                # 5. Extract credential from cookie jar
+                final_cookies = jar.filter_cookies(URL("https://www.bilibili.com"))
+                sessdata = final_cookies["SESSDATA"].value if "SESSDATA" in final_cookies else ""
+                bili_jct = final_cookies["bili_jct"].value if "bili_jct" in final_cookies else ""
+                dedeuserid = final_cookies["DedeUserID"].value if "DedeUserID" in final_cookies else ""
+                buvid3 = final_cookies["buvid3"].value if "buvid3" in final_cookies else ""
+
+                if not sessdata:
+                    raise RuntimeError("登录失败：未获取到 SESSDATA")
+
+                credential = Credential(
+                    sessdata=sessdata,
+                    bili_jct=bili_jct,
+                    dedeuserid=dedeuserid,
+                    ac_time_value=refresh_token,
+                    buvid3=buvid3,
+                )
+                save_credential(credential)
+                print("\n✅ 登录成功！凭证已保存")
+                return credential
+
+            if code == 86038:
+                raise RuntimeError("二维码已过期，请重试")
+            if code == 86090:
+                print("  📲 已扫码，请在手机上确认...")
+
+            await asyncio.sleep(2)

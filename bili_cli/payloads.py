@@ -31,6 +31,32 @@ def _format_duration(seconds: object) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+def _parse_duration_seconds(value: object) -> int:
+    """Parse a video duration into seconds.
+
+    Handles:
+    - int/float seconds (e.g. 587)
+    - 'MM:SS' string (e.g. '09:47', used by user video-list API)
+    - 'HH:MM:SS' string
+    """
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return 0
+        parts = text.split(":")
+        if len(parts) >= 2 and all(p.isdigit() for p in parts):
+            total = 0
+            for p in parts:
+                total = total * 60 + int(p)
+            return total
+        return _to_int(text, 0)
+    return 0
+
+
 def _strip_html(text: object) -> str:
     if not isinstance(text, str):
         return ""
@@ -65,7 +91,7 @@ def normalize_relation(info: dict[str, Any]) -> dict[str, Any]:
 def normalize_video_summary(video: dict[str, Any]) -> dict[str, Any]:
     owner = video.get("owner", {}) if isinstance(video.get("owner"), dict) else {}
     stat = video.get("stat", {}) if isinstance(video.get("stat"), dict) else {}
-    duration_seconds = _to_int(video.get("duration"), _to_int(video.get("length"), 0))
+    duration_seconds = _parse_duration_seconds(video.get("duration")) or _parse_duration_seconds(video.get("length"))
     url = ""
     if isinstance(video.get("bvid"), str) and video.get("bvid"):
         url = f"https://www.bilibili.com/video/{video['bvid']}"
