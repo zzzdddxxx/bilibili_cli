@@ -36,3 +36,6 @@ bvids: []
 # 是否跳过某一步骤（true / false）
 skip_fetch: false
 skip_analyze: false
+
+# 未登录时是否自动扫码登录（true / false）
+auto_login: true

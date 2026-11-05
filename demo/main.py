@@ -42,7 +42,8 @@ DEFAULT_CONFIG: dict = {
     "clear_output": False,     # 运行前清空输出目录（避免文件堆积）
     "begin_date": None,        # 发布时间过滤：起始日期 "2026-08-01"（含）
     "end_date": None,          # 发布时间过滤：结束日期 "2026-10-31"（含）
-    "sleep_range": [0.5, 2.5],  # 反爬：每个视频处理前的随机休息秒数范围（null 表示不休息）
+    "sleep_range": [0.2, 0.4],  # 反爬：每个视频处理前的随机休息秒数范围（null 表示不休息）
+    "auto_login": True,         # 未登录时是否自动扫码登录
 }
 
 
@@ -69,6 +70,19 @@ def _clear_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
+def ensure_credential(cfg: dict):
+    """获取登录凭证；未登录时根据 auto_login 配置决定是否自动扫码登录。"""
+    cred = auth.get_credential(mode="read")
+    if cred:
+        print("已使用本地登录凭证。")
+        return cred
+    if not cfg.get("auto_login", False):
+        print("错误：未登录。请先登录，或设置 auto_login: true 自动扫码登录。", file=sys.stderr)
+        raise SystemExit(2)
+    print("未检测到登录凭证，开始扫码登录...")
+    return asyncio.run(auth.qr_login())
+
+
 def do_fetch(cfg: dict) -> int:
     """步骤 1：批量拉取字幕。"""
     print("=" * 60)
@@ -76,10 +90,7 @@ def do_fetch(cfg: dict) -> int:
     print("=" * 60)
 
     uid, up_name = fetch_subtitles.resolve_up(cfg.get("up"))
-    cred = auth.get_credential(mode="read")
-    if not cred:
-        print("错误：未登录。字幕接口需要登录凭证，请先运行 bili login。", file=sys.stderr)
-        return 2
+    cred = ensure_credential(cfg)
     return asyncio.run(
         fetch_subtitles.run(
             uid,
